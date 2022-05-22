@@ -1,0 +1,10 @@
+---
+- name: os setting
+  hosts: '{{ hosts | default("all") }}'
+  gather_facts: yes
+  become: yes
+  become_user: root
+  become_method: sudo
+
+  roles:
+    - osenv

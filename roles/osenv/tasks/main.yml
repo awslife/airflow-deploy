@@ -1,0 +1,51 @@
+---
+- name: set ulimit for performance
+  lineinfile:
+    path: /etc/security/limits.d/airflow.conf
+    line: "{{ item.line }}"
+    create: yes
+  with_items:
+    - { line: 'airflow    soft    fsize    unlimited' }
+    - { line: 'airflow    hard    fsize    unlimited' }
+    - { line: 'airflow    soft    cpu      unlimited' }
+    - { line: 'airflow    hard    cpu      unlimited' }
+    - { line: 'airflow    soft    as       unlimited' }
+    - { line: 'airflow    hard    as       unlimited' }
+    - { line: 'airflow    soft    memlock  unlimited' }
+    - { line: 'airflow    hard    memlock  unlimited' }
+    - { line: 'airflow    soft    nofile   65534' }
+    - { line: 'airflow    hard    nofile   65534' }
+    - { line: 'airflow    soft    rss      unlimited' }
+    - { line: 'airflow    hard    rss      unlimited' }
+    - { line: 'airflow    soft    nproc    65534' }
+    - { line: 'airflow    hard    nproc    65534' }
+  tags:
+    - limit
+
+- name: add k8s repository
+  copy:
+    src: redhat/yum/kubernetes.repo.j2
+    dest: /etc/yum.repos.d/kubernetes.repo
+  tags:
+    - package
+
+- name: update dnf cache
+  yum:
+    update_cache: yes
+    exclude: "{{ ansible_distribution | lower }}-release"
+  tags:
+    - package
+
+- name: install essential packages
+  dnf:
+    name:
+      - '{{ python_version }}'
+      - '{{ python_version }}-pip'
+      - '{{ python_version }}-devel'
+      - '{{ python_version }}-requests'
+      - s3fs-fuse
+      - 'kubectl-{{ k8s_version }}'
+    disable_excludes: kubernetes
+    state: present
+  tags:
+    - package

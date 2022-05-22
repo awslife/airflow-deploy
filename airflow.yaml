@@ -1,0 +1,46 @@
+---
+- name: install airflow
+  hosts: '{{ hosts | default("all") }}'
+  gather_facts: yes
+  become: yes
+  become_user: root
+  become_method: sudo
+
+  vars:
+    ansible_user: "{{ lookup('env', 'ANSIBLE_USER') }}"
+    ansible_pass: "{{ lookup('env', 'ANSIBLE_PASS') }}"
+    ansible_ssh_pass: "{{ lookup('env', 'ANSIBLE_PASS') }}"
+
+    airflow_database: "{{ lookup('env', 'AIRFLOW_DATABASE') }}"
+    airflow_celery: "{{ lookup('env', 'AIRFLOW_CELERY') }}"
+    airflow_fernet_key: "{{ lookup('env', 'AIRFLOW_FERNET_KEY') }}"
+
+    airflow_s3_id: "{{ lookup('env', 'AIRFLOW_S3_ID') }}"
+    airflow_s3_host: "{{ lookup('env', 'AIRFLOW_S3_HOST') }}"
+    airflow_s3_port: "{{ lookup('env', 'AIRFLOW_S3_PORT') }}"
+    airflow_s3_url: "{{ lookup('env', 'AIRFLOW_S3_URL') }}"
+    airflow_s3_bucket: "{{ lookup('env', 'AIRFLOW_S3_BUCKET') }}"
+    airflow_s3_login: "{{ lookup('env', 'AIRFLOW_S3_LOGIN') }}"
+    airflow_s3_password: "{{ lookup('env', 'AIRFLOW_S3_PASSWORD') }}"
+
+    oidc_base_url: "{{ lookup('env', 'OIDC_BASE_URL') }}"
+    oidc_client_id: "{{ lookup('env', 'OIDC_CLIENT_ID') }}"
+    oidc_client_secret: "{{ lookup('env', 'OIDC_CLIENT_SECRET') }}"
+
+    k8s_cluster_server: "{{ lookup('env', 'K8S_CLUSTER_SERVER') }}"
+    k8s_cluster_name: "{{ lookup('env', 'K8S_CLUSTER_NAME') }}"
+    k8s_cluster_certificate_authority_data: "{{ lookup('env', 'K8S_CLUSTER_CERTIFICATE_AUTHORITY_DATA') }}"
+    k8s_namespace: "{{ lookup('env', 'K8S_NAMESPACE') }}"
+    k8s_user_name: "{{ lookup('env', 'K8S_USER_NAME') }}"
+    k8s_user_client_certificate_data: "{{ lookup('env', 'K8S_USER_CLIENT_CERTIFICATE_DATA') }}"
+    k8s_user_client_key_data: "{{ lookup('env', 'K8S_USER_CLIENT_KEY_DATA') }}"
+
+  pre_tasks:
+    - name: gather airflow list
+      set_fact:
+        airflow_list: "{{ groups['AIRFLOW'] | list  }}"
+      tags:
+        - always
+
+  roles:
+    - airflow

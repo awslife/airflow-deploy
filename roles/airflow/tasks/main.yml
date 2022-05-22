@@ -1,0 +1,375 @@
+---
+- name: stop airflow
+  systemd:
+    name: "{{ item.name }}"
+    state: stopped
+  with_items:
+    - { name: "airflow-webserver" }
+    - { name: "airflow-scheduler" }
+  ignore_errors: True
+  tags:
+    - init
+    - stop
+    - service
+
+- name: config firewall
+  block:
+    - firewalld:
+        port: 8080/tcp
+        permanent: yes
+        state: enabled
+    - systemd:
+        name: firewalld
+        state: reloaded
+  tags:
+    - init
+    - firewall
+
+- name: create airflow user
+  user:
+    name: airflow
+    uid: "{{ airflow_uid }}"
+    group: "{{ airflow_group }}"
+    home: "{{ airflow_home }}"
+    create_home: yes
+    system: yes
+    state: present
+  tags:
+    - conf
+    - user
+
+- name: unmount airflow dag on s3
+  mount:
+    path: "{{ airflow_home }}/dags"
+    state: unmounted
+  tags:
+    - conf
+    - mount
+
+- name: delete old airflow directory
+  file:
+    path: "{{ item.path }}"
+    state: absent
+  with_items:
+    - { path: "{{ airflow_home }}/.kube" }
+    - { path: "{{ airflow_home }}/plugins" }
+    - { path: "{{ airflow_home }}/logs" }
+    - { path: "{{ airflow_home }}/configs" }
+    - { path: "{{ airflow_home }}/dags" }
+    - { path: "/etc/s3fs" }
+    - { path: "/var/run/airflow" }
+    - { path: "/var/log/airflow" }
+    - { path: "~airflow/.local/share/virtualenv" }
+    - { path: "~airflow/.local/share/virtualenvs" }
+  tags:
+    - conf
+    - dir
+
+- name: create airflow directory
+  file:
+    path: "{{ item.path }}"
+    owner: airflow
+    group: "{{ airflow_group }}"
+    mode: "{{ item.mode }}"
+    state: directory
+  with_items:
+    - {
+      path: "{{ airflow_home }}/.kube",
+      mode: "0755",
+      state: "directory",
+      }
+    - {
+      path: "{{ airflow_home }}/plugins",
+      mode: "0755",
+      state: "directory",
+      }
+    - {
+      path: "{{ airflow_home }}/logs",
+      mode: "0755",
+      state: "directory",
+      }
+    - {
+      path: "{{ airflow_home }}/configs",
+      mode: "0755",
+      state: "directory",
+      }
+    - {
+      path: "{{ airflow_home }}/dags",
+      mode: "0755",
+      state: "directory",
+      }
+    - {
+      path: "/var/run/airflow",
+      mode: "0755",
+      state: "directory",
+      }
+    - {
+      path: "/var/log/airflow",
+      mode: "0755",
+      state: "directory",
+      }
+  tags:
+    - conf
+    - dir
+
+- name: create s3 access and secret key for s3fuse
+  lineinfile:
+    path: /etc/s3fs
+    line: "{{ airflow_s3_login }}:{{ airflow_s3_password }}"
+    mode: "0600"
+    state: present
+    create: yes
+  tags:
+    - conf
+
+- name: mount dag path on s3
+  mount:
+    path: "{{ airflow_home }}/dags"
+    src: "{{ airflow_s3_bucket }}"
+    boot: yes
+    fstype: "fuse.s3fs"
+    opts: "url={{ airflow_s3_url }},passwd_file=/etc/s3fs,uid={{ airflow_uid }},gid={{ airflow_gid }},_netdev,use_path_request_style,allow_other,mp_umask=0022,umask=0133,dbglevel=info"
+    state: mounted
+  tags:
+    - conf
+
+- name: get installed python version
+  shell: |
+    python3 --version | cut -d" " -f2 | cut -d"." -f1-2
+  register: py_version
+  when: airflow_list[0] == inventory_hostname
+  tags:
+    - install
+
+- name: register py version in host
+  add_host:
+    name: "py_version"
+    value: "{{ py_version.stdout }}"
+  when: airflow_list[0] == inventory_hostname
+  tags:
+    - install
+
+- name: set python version in os
+  set_fact:
+    py_ver: "{{ hostvars['py_version']['value'] }}"
+  tags:
+    - install
+
+- name: install airflow
+  shell: |
+    python3 -m pip install --user --upgrade --quiet --no-cache-dir --no-warn-script-location pip
+    python3 -m pip install --user --quiet --no-cache-dir --no-warn-script-location \
+      "apache-airflow[{{ airflow_extra_packages }}]=={{ airflow_version }}" \
+      --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-{{ airflow_version }}/constraints-no-providers-{{ py_ver }}.txt"
+  environment:
+    PATH: "{{ airflow_home }}/.local/bin:{{ ansible_env.PATH }}:/usr/local/bin"
+  args:
+    chdir: "{{ airflow_home }}"
+  become_user: airflow
+  tags:
+    - install
+
+- name: copy airflow config
+  copy:
+    src: airflow/{{ airflow_version_list[:2] | join('.') }}/airflow.cfg
+    dest: "{{ airflow_home }}/airflow.cfg"
+    owner: airflow
+    group: "{{ airflow_group }}"
+  vars:
+    airflow_version_list: "{{ airflow_version.split('.') }}"
+  tags:
+    - config
+
+- name: config airflow config
+  replace:
+    path: "{{ airflow_home }}/airflow.cfg"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.replace }}"
+  with_items:
+    - { regexp: "^dags_folder =.*$", replace: "dags_folder = {{ airflow_home }}/dags/s3" }
+    - { regexp: "^default_timezone =.*$", replace: "default_timezone = {{ airflow_core_default_timezone }}" }
+    - { regexp: "^executor =.*$", replace: "executor = {{ airflow_core_executor }}" }
+    - { regexp: "^sql_alchemy_conn =.*$", replace: "sql_alchemy_conn = {{ airflow_database }}" }
+    - { regexp: "^load_examples =.*$", replace: "load_examples = {{ airflow_core_load_examples }}" }
+    - { regexp: "^fernet_key =.*$", replace: "fernet_key = {{ airflow_fernet_key }}"}
+    - { regexp: "^plugins_folder =.*$", replace: "plugins_folder = {{ airflow_home }}/plugins" }
+    - { regexp: "^base_log_folder =.*$", replace: "base_log_folder = {{ airflow_home }}/logs" }
+    - { regexp: "^remote_logging =.*$", replace: "remote_logging = {{ airflow_logging_remote_logging }}" }
+    - { regexp: "^remote_log_conn_id =.*$", replace: "remote_log_conn_id = {{ airflow_logging_remote_log_conn_id }}" }
+    - { regexp: "^remote_base_log_folder =.*$", replace: "remote_base_log_folder = {{ airflow_logging_remote_base_log_folder }}" }
+    - { regexp: "^encrypt_s3_logs =.*$", replace: "encrypt_s3_logs = {{ airflow_logging_encrypt_s3_logs }}" }
+    - { regexp: "^dag_processor_manager_log_location =.*$", replace: "dag_processor_manager_log_location = {{ airflow_home }}/logs/dag_processor_manager/dag_processor_manager.log" }
+    - { regexp: "^endpoint_url =.*$", replace: "endpoint_url = {{ airflow_url }}" }
+    - { regexp: "^base_url =.*$", replace: "base_url = {{ airflow_url }}" }
+    - { regexp: "^default_ui_timezone =.*$", replace: "default_ui_timezone = {{ airflow_core_default_timezone }}" }
+    - { regexp: "^result_backend =.*$", replace: "result_backend = {{ airflow_celery }}" }
+    - { regexp: "^child_process_log_directory =.*$", replace: "child_process_log_directory = {{ airflow_home }}/logs/scheduler" }
+    - { regexp: "^pod_template_file =.*$", replace: "pod_template_file = {{airflow_home}}/configs/pod_template.yaml" }
+    - { regexp: "^worker_container_repository =.*$", replace: "worker_container_repository = {{ airflow_kubernetes_worker_container_repository }}" }
+    - { regexp: "^worker_container_tag =.*$", replace: "worker_container_tag = {{ airflow_kubernetes_worker_container_tag }}" }
+    - { regexp: "^namespace =.*$", replace: "namespace = {{ airflow_kubernetes_namespace }}" }
+    - { regexp: "^in_cluster =.*$", replace: "in_cluster = {{ airflow_kubernetes_in_cluster }}" }
+    - { regexp: "^# config_file =.*$", replace: "config_file = {{ airflow_home }}/.kube/config" }
+    - { regexp: "^delete_worker_pods =.*$", replace: "delete_worker_pods = {{ airflow_kubernetes_delete_worker_pods }}" }
+    - { regexp: "^delete_worker_pods_on_failure =.*$", replace: "delete_worker_pods_on_failure = {{ airflow_kubernetes_delete_worker_pods_on_failure }}" }
+    # - { regexp: "", replace: "" }
+  tags:
+    - config
+
+- name: copy airflow config
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: airflow
+    group: "{{ airflow_group }}"
+    mode: 0644
+  with_items:
+    - { src: "config/{{ airflow_version_list[:2] | join('.') }}/webserver_config.py.j2", dest: "{{ airflow_home }}/webserver_config.py" }
+  vars:
+    airflow_version_list:  "{{ airflow_version.split('.') }}"
+  tags:
+    - config
+
+- name: initialize airflow database
+  shell: |
+    airflow db reset --yes
+    airflow connections add '{{ airflow_s3_id }}' \
+     --conn-type 's3' \
+     --conn-host '{{ airflow_s3_host }}' \
+     --conn-port '{{ airflow_s3_port }}' \
+     --conn-login '{{ airflow_s3_login }}' \
+     --conn-password '{{ airflow_s3_password }}' \
+     --conn-extra '{ "host": "{{ airflow_s3_url }}", "aws_access_key_id":"{{ airflow_s3_login }}", "aws_secret_access_key": "{{ airflow_s3_password }}" }'
+  environment:
+    AIRFLOW_HOME: "{{ airflow_home }}"
+    PATH: "{{ airflow_home }}/.local/bin:{{ ansible_env.PATH }}:/usr/local/bin"
+  args:
+    chdir: "{{ airflow_home }}"
+  become_user: airflow
+  when: airflow_list[0] == inventory_hostname
+  tags:
+    - config
+
+- name: set kubeconfig for kubernetes executor
+  shell: |
+    kubectl config set-cluster {{ k8s_cluster_name }} \
+      --server={{ k8s_cluster_server }}
+
+    kubectl config set clusters.{{ k8s_cluster_name }}.certificate-authority-data \
+      --set-raw-bytes=false \
+      '{{ k8s_cluster_certificate_authority_data }}'
+
+    kubectl config set users.{{ k8s_user_name }}.client-certificate-data \
+      --set-raw-bytes=false \
+      '{{ k8s_user_client_certificate_data }}'
+
+    kubectl config set users.{{ k8s_user_name }}.client-key-data \
+      --set-raw-bytes=false \
+      '{{ k8s_user_client_key_data }}'
+
+    kubectl config set-context {{ k8s_user_name }}@{{ k8s_cluster_name }} \
+      --namespace={{ k8s_namespace }} \
+      --cluster={{ k8s_cluster_name }} \
+      --user={{ k8s_user_name }}
+
+    kubectl config use-context {{ k8s_user_name }}@{{ k8s_cluster_name }}
+  environment:
+    AIRFLOW_HOME: "{{ airflow_home }}"
+    KUBECONFIG: "{{ airflow_home }}/.kube/config"
+    PATH: "{{ airflow_home }}/.local/bin:{{ ansible_env.PATH }}:/usr/local/bin"
+  args:
+    chdir: "{{ airflow_home }}"
+  become_user: airflow
+  when: airflow_list[0] == inventory_hostname
+  tags:
+    - config
+
+- name: initialize airflow resources on kubernetes
+  shell: |
+    kubectl create secret generic {{ airflow_release_name }}-airflow-s3-secret \
+      --namespace airflow \
+      --dry-run=client \
+      --from-literal=aws_access_key_id={{ airflow_s3_login }} \
+      --from-literal=aws_secret_access_key={{ airflow_s3_password }} \
+      -o yaml | kubectl apply -f -
+
+    kubectl create secret generic {{ airflow_release_name }}-airflow-fernet-key \
+      --namespace airflow \
+      --dry-run=client \
+      --from-literal=fernet-key={{ airflow_fernet_key }} \
+      -o yaml | kubectl apply -f -
+
+    kubectl create secret generic {{ airflow_release_name }}-airflow-metadata \
+      --namespace airflow \
+      --dry-run=client \
+      --from-literal=connection={{ airflow_database }} \
+      -o yaml | kubectl apply -f -
+
+    kubectl create serviceaccount {{ airflow_release_name }}-airflow-worker-serviceaccount \
+      --namespace airflow \
+      --dry-run=client \
+      -o yaml | kubectl apply -f -
+
+    kubectl create configmap {{ airflow_release_name }}-airflow-config \
+      --namespace airflow \
+      --dry-run=client \
+      --from-file={{ airflow_home }}/airflow.cfg \
+      -o yaml | kubectl apply -f -
+  environment:
+    AIRFLOW_HOME: "{{ airflow_home }}"
+    KUBECONFIG: "{{ airflow_home }}/.kube/config"
+    PATH: "{{ airflow_home }}/.local/bin:{{ ansible_env.PATH }}:/usr/local/bin"
+  args:
+    chdir: "{{ airflow_home }}"
+  become_user: airflow
+  when: airflow_list[0] == inventory_hostname
+  tags:
+    - config
+
+- name: copy airflow pod template
+  template:
+    src: config/{{ airflow_version_list[:2] | join('.') }}/pod_template.yaml.j2
+    dest: "{{ airflow_home }}/configs/pod_template.yaml"
+    owner: airflow
+    group: "{{ airflow_group }}"
+    mode: 0644
+  vars:
+    airflow_version_list:  "{{ airflow_version.split('.') }}"
+  tags:
+    - config
+
+- name: copy airflow webserver service template
+  template:
+    src: systemd/airflow-webserver.service.j2
+    dest: /usr/lib/systemd/system/airflow-webserver.service
+    mode: 0644
+  tags:
+    - service
+
+- name: start airflow webserver service
+  systemd:
+    name: airflow-webserver
+    daemon_reload: yes
+    enabled: yes
+    state: started
+  tags:
+    - service
+    - start
+
+- name: copy airflow scheduler service template
+  template:
+    src: systemd/airflow-scheduler.service.j2
+    dest: /usr/lib/systemd/system/airflow-scheduler.service
+    mode: 0644
+  tags:
+    - service
+
+- name: start airflow scheduler service
+  systemd:
+    name: airflow-scheduler
+    daemon_reload: yes
+    enabled: yes
+    state: started
+  tags:
+    - service
+    - start

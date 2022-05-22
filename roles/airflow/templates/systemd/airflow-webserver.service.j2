@@ -1,0 +1,20 @@
+[Unit]
+Description=Airflow webserver daemon
+After=network.target
+
+[Service]
+Environment=AIRFLOW_HOME={{ airflow_home }}
+Environment=PATH={{ airflow_home }}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+User=airflow
+Group={{ airflow_group }}
+Type=simple
+WorkingDirectory={{ airflow_home }}
+RuntimeDirectory=airflow
+LogsDirectory=airflow
+ExecStart={{ airflow_home }}/.local/bin/airflow webserver --pid /run/airflow/webserver.pid
+Restart=on-failure
+RestartSec=5s
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
