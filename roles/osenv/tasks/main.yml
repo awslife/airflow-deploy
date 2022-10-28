@@ -39,12 +39,10 @@
 - name: install essential packages
   dnf:
     name:
-      - '{{ python_version }}'
-      - '{{ python_version }}-pip'
-      - '{{ python_version }}-devel'
-      - '{{ python_version }}-requests'
-      - s3fs-fuse
       - 'kubectl-{{ k8s_version }}'
+      - conda
+      - gcc
+      - s3fs-fuse
     disable_excludes: kubernetes
     state: present
   tags:

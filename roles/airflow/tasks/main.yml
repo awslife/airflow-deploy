@@ -1,4 +1,10 @@
 ---
+- name: set profile name
+  set_fact:
+    profile_name: "airflow-{{ airflow_version }}-python{{ python_version }}"
+  tags:
+    - always
+
 - name: stop airflow
   systemd:
     name: "{{ item.name }}"
@@ -11,6 +17,15 @@
     - init
     - stop
     - service
+
+- name: delete conda environment
+  shell: |
+    conda env remove -y -n {{ profile_name }}
+  become_user: airflow
+  ignore_errors: True
+  tags:
+    - init
+    - stop
 
 - name: config firewall
   block:
@@ -59,8 +74,7 @@
     - { path: "/etc/s3fs" }
     - { path: "/var/run/airflow" }
     - { path: "/var/log/airflow" }
-    - { path: "~airflow/.local/share/virtualenv" }
-    - { path: "~airflow/.local/share/virtualenvs" }
+    - { path: "~airflow/.conda" }
   tags:
     - conf
     - dir
@@ -133,39 +147,45 @@
   tags:
     - conf
 
-- name: get installed python version
+- name: create conda environment
   shell: |
-    python3 --version | cut -d" " -f2 | cut -d"." -f1-2
-  register: py_version
-  when: airflow_list[0] == inventory_hostname
-  tags:
-    - install
-
-- name: register py version in host
-  add_host:
-    name: "py_version"
-    value: "{{ py_version.stdout }}"
-  when: airflow_list[0] == inventory_hostname
-  tags:
-    - install
-
-- name: set python version in os
-  set_fact:
-    py_ver: "{{ hostvars['py_version']['value'] }}"
-  tags:
-    - install
-
-- name: install airflow
-  shell: |
-    python3 -m pip install --user --upgrade --quiet --no-cache-dir --no-warn-script-location pip
-    python3 -m pip install --user --quiet --no-cache-dir --no-warn-script-location \
-      "apache-airflow[{{ airflow_extra_packages }}]=={{ airflow_version }}" \
-      --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-{{ airflow_version }}/constraints-no-providers-{{ py_ver }}.txt"
+    conda config --set auto_activate_base false
+    conda config --set default_threads 4
+    conda create -y -n {{ profile_name }} python={{ python_version }}
   environment:
     PATH: "{{ airflow_home }}/.local/bin:{{ ansible_env.PATH }}:/usr/local/bin"
   args:
     chdir: "{{ airflow_home }}"
   become_user: airflow
+  register: result
+  failed_when: result.rc > 1
+  tags:
+    - install
+
+- name: install pip
+  shell: |
+    conda install -n {{ profile_name }} -y pip postgresql
+  args:
+    chdir: "{{ airflow_home }}"
+  become_user: airflow
+  register: result
+  failed_when: result.rc > 1
+  tags:
+    - install
+
+- name: install airflow
+  shell: |
+      conda run -n {{ profile_name }} \
+        pip install --quiet --no-cache-dir --no-warn-script-location \
+          "apache-airflow[{{ airflow_extra_packages }}]=={{ airflow_version }}" \
+          --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-{{ airflow_version }}/constraints-no-providers-{{ python_version }}.txt"
+  environment:
+    PATH: "{{ airflow_home }}/.local/bin:{{ ansible_env.PATH }}:/usr/local/bin"
+  args:
+    chdir: "{{ airflow_home }}"
+  become_user: airflow
+  register: result
+  failed_when: result.rc > 1
   tags:
     - install
 
@@ -187,6 +207,7 @@
     replace: "{{ item.replace }}"
   with_items:
     - { regexp: "^dags_folder =.*$", replace: "dags_folder = {{ airflow_home }}/dags/s3" }
+    - { regexp: "^hostname_callable =.*$", replace: "hostname_callable = airflow.utils.net.get_host_ip_address" }
     - { regexp: "^default_timezone =.*$", replace: "default_timezone = {{ airflow_core_default_timezone }}" }
     - { regexp: "^executor =.*$", replace: "executor = {{ airflow_core_executor }}" }
     - { regexp: "^sql_alchemy_conn =.*$", replace: "sql_alchemy_conn = {{ airflow_database }}" }
@@ -206,13 +227,13 @@
     - { regexp: "^child_process_log_directory =.*$", replace: "child_process_log_directory = {{ airflow_home }}/logs/scheduler" }
     - { regexp: "^pod_template_file =.*$", replace: "pod_template_file = {{airflow_home}}/configs/pod_template.yaml" }
     - { regexp: "^worker_container_repository =.*$", replace: "worker_container_repository = {{ airflow_kubernetes_worker_container_repository }}" }
-    - { regexp: "^worker_container_tag =.*$", replace: "worker_container_tag = {{ airflow_kubernetes_worker_container_tag }}" }
+    - { regexp: "^worker_container_tag =.*$", replace: "worker_container_tag = {{ airflow_version }}-python{{ python_version }}" }
     - { regexp: "^namespace =.*$", replace: "namespace = {{ airflow_kubernetes_namespace }}" }
     - { regexp: "^in_cluster =.*$", replace: "in_cluster = {{ airflow_kubernetes_in_cluster }}" }
     - { regexp: "^# config_file =.*$", replace: "config_file = {{ airflow_home }}/.kube/config" }
     - { regexp: "^delete_worker_pods =.*$", replace: "delete_worker_pods = {{ airflow_kubernetes_delete_worker_pods }}" }
     - { regexp: "^delete_worker_pods_on_failure =.*$", replace: "delete_worker_pods_on_failure = {{ airflow_kubernetes_delete_worker_pods_on_failure }}" }
-    # - { regexp: "", replace: "" }
+    - { regexp: "^auth_backends =.*$", replace: "auth_backends = user_auth" }
   tags:
     - config
 
@@ -225,6 +246,7 @@
     mode: 0644
   with_items:
     - { src: "config/{{ airflow_version_list[:2] | join('.') }}/webserver_config.py.j2", dest: "{{ airflow_home }}/webserver_config.py" }
+    - { src: "config/{{ airflow_version_list[:2] | join('.') }}/user_auth.py.j2", dest: "{{ airflow_home }}/user_auth.py" }
   vars:
     airflow_version_list:  "{{ airflow_version.split('.') }}"
   tags:
@@ -232,20 +254,22 @@
 
 - name: initialize airflow database
   shell: |
-    airflow db reset --yes
-    airflow connections add '{{ airflow_s3_id }}' \
-     --conn-type 's3' \
-     --conn-host '{{ airflow_s3_host }}' \
-     --conn-port '{{ airflow_s3_port }}' \
-     --conn-login '{{ airflow_s3_login }}' \
-     --conn-password '{{ airflow_s3_password }}' \
-     --conn-extra '{ "host": "{{ airflow_s3_url }}", "aws_access_key_id":"{{ airflow_s3_login }}", "aws_secret_access_key": "{{ airflow_s3_password }}" }'
+    conda run -n {{ profile_name }} airflow db reset --yes
+    conda run -n {{ profile_name }} airflow connections add '{{ airflow_s3_id }}' \
+      --conn-type 's3' \
+      --conn-host '{{ airflow_s3_host }}' \
+      --conn-port '{{ airflow_s3_port }}' \
+      --conn-login '{{ airflow_s3_login }}' \
+      --conn-password '{{ airflow_s3_password }}' \
+      --conn-extra '{ "host": "{{ airflow_s3_url }}", "aws_access_key_id":"{{ airflow_s3_login }}", "aws_secret_access_key": "{{ airflow_s3_password }}" }'
   environment:
     AIRFLOW_HOME: "{{ airflow_home }}"
     PATH: "{{ airflow_home }}/.local/bin:{{ ansible_env.PATH }}:/usr/local/bin"
   args:
     chdir: "{{ airflow_home }}"
   become_user: airflow
+  register: result
+  failed_when: result.rc > 1
   when: airflow_list[0] == inventory_hostname
   tags:
     - config
