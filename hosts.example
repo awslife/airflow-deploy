@@ -11,14 +11,10 @@ airflow3
 [all:vars]
 
 [AIRFLOW:vars]
-python_version=python38
-k8s_version=1.21.3
+python_version=3.8
+k8s_version=1.21.14
 
-airflow_version=2.2.4
-airflow_uid=50000
-airflow_gid=100
-airflow_group=users
-airflow_home=/opt/airflow
+airflow_version=2.4.2
 
 airflow_release_name=homelab
 airflow_url=http://192.168.11.120:8080/
@@ -33,9 +29,9 @@ airflow_logging_remote_log_conn_id=nectarine
 airflow_logging_remote_base_log_folder=s3://airflow/logs
 airflow_logging_encrypt_s3_logs=False
 
+airflow_schduler_dag_dir_list_interval=10
+
 airflow_kubernetes_worker_container_repository=docker.io/apache/airflow
-airflow_kubernetes_worker_container_tag=2.2.5-python3.8
-airflow_kubernetes_namespace=airflow
-airflow_kubernetes_in_cluster=False
+airflow_kubernetes_namespace=airflow-homelab
 airflow_kubernetes_delete_worker_pods=True
 airflow_kubernetes_delete_worker_pods_on_failure=False

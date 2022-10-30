@@ -2,6 +2,11 @@
 - name: set profile name
   set_fact:
     profile_name: "airflow-{{ airflow_version }}-python{{ python_version }}"
+    airflow_home: "/opt/airflow"
+    airflow_uid: "50000"
+    airflow_gid: "100"
+    airflow_group: "users"
+    airflow_kubernetes_in_cluster: "False"
   tags:
     - always
 
@@ -162,14 +167,27 @@
   tags:
     - install
 
-- name: install pip
-  shell: |
-    conda install -n {{ profile_name }} -y pip postgresql
-  args:
-    chdir: "{{ airflow_home }}"
+- name: install user extra packages
+  block:
+    - name: install conda user extra packages
+      shell: |
+        conda install -n {{ profile_name }} -y pip postgresql
+      args:
+        chdir: "{{ airflow_home }}"
+      register: result
+      failed_when: result.rc > 1
+    
+    - name: install pip user extra packages
+      shell: |
+        conda run -n {{ profile_name }} \
+          pip install --quiet --no-cache-dir --no-warn-script-location docker
+      args:
+        chdir: "{{ airflow_home }}"
+      register: result
+      failed_when: result.rc > 1
+  environment:
+    PATH: "{{ airflow_home }}/.local/bin:{{ ansible_env.PATH }}:/usr/local/bin"
   become_user: airflow
-  register: result
-  failed_when: result.rc > 1
   tags:
     - install
 
@@ -233,6 +251,7 @@
     - { regexp: "^# config_file =.*$", replace: "config_file = {{ airflow_home }}/.kube/config" }
     - { regexp: "^delete_worker_pods =.*$", replace: "delete_worker_pods = {{ airflow_kubernetes_delete_worker_pods }}" }
     - { regexp: "^delete_worker_pods_on_failure =.*$", replace: "delete_worker_pods_on_failure = {{ airflow_kubernetes_delete_worker_pods_on_failure }}" }
+    - { regexp: "^dag_dir_list_interval =.*$", replace: "dag_dir_list_interval = {{ airflow_schduler_dag_dir_list_interval }}" }
     - { regexp: "^auth_backends =.*$", replace: "auth_backends = user_auth" }
   tags:
     - config
@@ -310,32 +329,30 @@
 
 - name: initialize airflow resources on kubernetes
   shell: |
+    kubectl create namespace {{ airflow_kubernetes_namespace }} \
+      --dry-run=client -o yaml | kubectl apply -f -
+
     kubectl create secret generic {{ airflow_release_name }}-airflow-s3-secret \
-      --namespace airflow \
+      --namespace {{ airflow_kubernetes_namespace }} \
       --dry-run=client \
       --from-literal=aws_access_key_id={{ airflow_s3_login }} \
       --from-literal=aws_secret_access_key={{ airflow_s3_password }} \
       -o yaml | kubectl apply -f -
 
     kubectl create secret generic {{ airflow_release_name }}-airflow-fernet-key \
-      --namespace airflow \
+      --namespace {{ airflow_kubernetes_namespace }} \
       --dry-run=client \
       --from-literal=fernet-key={{ airflow_fernet_key }} \
       -o yaml | kubectl apply -f -
 
     kubectl create secret generic {{ airflow_release_name }}-airflow-metadata \
-      --namespace airflow \
+      --namespace {{ airflow_kubernetes_namespace }} \
       --dry-run=client \
       --from-literal=connection={{ airflow_database }} \
       -o yaml | kubectl apply -f -
 
-    kubectl create serviceaccount {{ airflow_release_name }}-airflow-worker-serviceaccount \
-      --namespace airflow \
-      --dry-run=client \
-      -o yaml | kubectl apply -f -
-
     kubectl create configmap {{ airflow_release_name }}-airflow-config \
-      --namespace airflow \
+      --namespace {{ airflow_kubernetes_namespace }} \
       --dry-run=client \
       --from-file={{ airflow_home }}/airflow.cfg \
       -o yaml | kubectl apply -f -
@@ -349,6 +366,41 @@
   when: airflow_list[0] == inventory_hostname
   tags:
     - config
+
+- name: create serviceaccount and config role
+  shell: |
+    kubectl create serviceaccount {{ airflow_release_name }}-airflow-worker-serviceaccount \
+      --namespace {{ airflow_kubernetes_namespace }} \
+      --dry-run=client \
+      -o yaml | kubectl apply -f -
+
+    cat << EOF | kubectl apply -f -
+    ---
+    kind: RoleBinding
+    apiVersion: rbac.authorization.k8s.io/v1
+    metadata:
+      name: rolebinding-clusteradmin-{{ airflow_release_name }}-airflow-worker-serviceaccount
+      namespace: {{ airflow_kubernetes_namespace }}
+    roleRef:
+      kind: ClusterRole
+      name: admin
+      apiGroup: rbac.authorization.k8s.io
+    subjects:
+    - kind: ServiceAccount
+      name: {{ airflow_release_name }}-airflow-worker-serviceaccount
+      namespace: {{ airflow_kubernetes_namespace }}
+    EOF
+  environment:
+    AIRFLOW_HOME: "{{ airflow_home }}"
+    KUBECONFIG: "{{ airflow_home }}/.kube/config"
+    PATH: "{{ airflow_home }}/.local/bin:{{ ansible_env.PATH }}:/usr/local/bin"
+  args:
+    chdir: "{{ airflow_home }}"
+  become_user: airflow
+  when: airflow_list[0] == inventory_hostname
+  tags:
+    - config
+    - service_account
 
 - name: copy airflow pod template
   template:

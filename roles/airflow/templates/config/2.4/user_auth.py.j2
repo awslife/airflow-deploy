@@ -36,11 +36,10 @@ import requests
 from base64 import b64decode
 from cryptography.hazmat.primitives import serialization
 
-CLIENT_AUTH: tuple[str, str] | Any | None = None
 log = logging.getLogger(__name__)
 
+CLIENT_AUTH: tuple[str, str] | Any | None = None
 CLIENT_ID = '{{ oidc_client_id }}'
-OIDC_ISSUER = 'https://keycloak.homelab.local/auth/realms/homelab'
 
 req = requests.get('{{ oidc_base_url }}')
 key_der_base64 = req.json()["public_key"]

@@ -32,8 +32,6 @@ The specifications of the Airflow web server and scheduler server are as follows
 
 ### Airflow playbook deploy
 
-
-
 - https://blogs.halodoc.io/airflow-cluster-architecture-at-halodoc-self-managed-challenges-and-learnings/
 - https://airflow.apache.org/docs/apache-airflow/stable/installation.html#prerequisites
 - https://medium.com/softwaresanders/making-apache-airflow-highly-available-1cfcec8996f2
